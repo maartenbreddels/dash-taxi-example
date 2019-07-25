@@ -31,8 +31,22 @@ df.categorize(column='pu_day_of_week', labels=labels['day_of_week'], check=False
 x = str(df.pickup_longitude)
 y = str(df.pickup_latitude)
 limits = df.limits([x, y], '96%')
+shape = 256
+
+# if we don't fill the store, dash will call the callbacks with None as data
+count_all = df.count(binby=[x, y, df.pu_hour],
+                    limits=[limits[0], limits[1], None],
+                    shape=shape, edges=True,
+                    progress=True)
+count = count_all.sum(axis=2)[2:-1, 2:-1]
+count_hours_zoom = count_all[2:-1, 2:-1].sum(axis=(0,1))[2:-1]
+count_hours_all = count_all.sum(axis=(0,1))[2:-1]
+
 
 app.layout = html.Div(children=[
+    dcc.Store(id='limits', data=limits),
+    dcc.Store(id='data-heatmap', data=count.T.tolist()),
+    dcc.Store(id='data-bar', data=[count_hours_zoom, count_hours_all]),
     html.H1(children='Hello Dash & Vaex'),
     dcc.Dropdown(id='month',
         options=[{'label': k, 'value': i} for i, k in enumerate(labels['month'])],
@@ -40,18 +54,7 @@ app.layout = html.Div(children=[
     ),
     html.Div([
         dcc.Graph(
-            id='my-graph',
-            figure={
-                'data': [
-                    {'x': [1, 2, 3], 'y': [9, 1, 2], 'type': 'bar', 'name': 'SF'},
-                    {'x': [1, 2, 3], 'y': [2, 4, 5], 'type': 'bar', 'name': u'Montréal'},
-                ],
-                'layout': {
-                    'title': 'Dash+Vaex: 150 million taxi rides.',
-                    'xaxis': {'label': x, 'range': limits[0]},
-                    'yaxis': {'label': y, 'range': limits[1]}
-                }
-            }
+            id='heatmap',
         )],
         style={'width': '49%', 'display': 'inline-block', 'padding': '0 20'}
     ),
@@ -63,54 +66,64 @@ app.layout = html.Div(children=[
                 labelStyle={'display': 'inline-block'}
             ),
         dcc.Graph(
-            id='my-bar',
-            figure={
-                'data': [
-                    {'x': [1, 2, 3], 'y': [9, 1, 2], 'type': 'bar', 'name': 'SF'},
-                    {'x': [1, 2, 3], 'y': [2, 4, 5], 'type': 'bar', 'name': u'Montréal'},
-                ],
-                'layout': {
-                    'title': 'Dash+Vaex: 150 million taxi rides.',
-                    'xaxis': {'label': x, 'range': limits[0]},
-                    'yaxis': {'label': y, 'range': limits[1]}
-                }
-            }
+            id='bar-chart',
         )],
         style={'width': '49%', 'display': 'inline-block', 'float': 'right', 'padding': '0 20'}
     ),
 
 ])
 
+
 @app.callback(
-    [Output(component_id='my-graph', component_property='figure'),
-     Output(component_id='my-bar', component_property='figure')],
-    [Input(component_id='month', component_property='value'),
-     Input(component_id='my-graph', component_property='relayoutData'),
-     Input('yaxis-type', 'value'),]
+    Output(component_id='limits', component_property='data'),
+    [Input(component_id='heatmap', component_property='relayoutData')]
 )
-def update_output_div(month_value, relayoutData, yaxis_type):
-    print(relayoutData)
-    if relayoutData is not None and 'xaxis.range[0]' in relayoutData:# is None or relayoutData.get('autosize', False) or :
+def update_limits(relayoutData):
+    print('update_limits', relayoutData)
+    if relayoutData is not None and 'xaxis.range[0]' in relayoutData:
         d = relayoutData
         user_limits = [[d['xaxis.range[0]'], d['xaxis.range[1]']], [d['yaxis.range[0]'], d['yaxis.range[1]']]]
     else:
         user_limits = limits
+    return user_limits
+
+
+@app.callback(
+    [Output(component_id='data-heatmap', component_property='data'),
+     Output(component_id='data-bar', component_property='data')],
+    [Input(component_id='month', component_property='value'),
+     Input(component_id='limits', component_property='data')]
+)
+def update_data(month_value, user_limits):
+    print('updating data: limits', user_limits)
     limits_x, limits_y = user_limits
     if month_value == 0:
         dff = df
     else:
         dff = df[df.pu_month==month_value-1]
-    shape = 256
     count_all = dff.count(binby=[x, y, dff.pu_hour], limits=[user_limits[0], user_limits[1], None], shape=shape, edges=True)
     count = count_all.sum(axis=2)[2:-1, 2:-1]
     count_hours_zoom = count_all[2:-1, 2:-1].sum(axis=(0,1))[2:-1]
     count_hours_all = count_all.sum(axis=(0,1))[2:-1]
     
-    total_count = count.sum()
-    z = np.log1p(count).T.tolist()
-    data = {'z': z, 'x': dff.bin_centers(x, limits_x, shape=shape), 'y': dff.bin_centers(y, limits_y, shape=shape), 'type': 'heatmap'}
+    return count.T.tolist(), [count_hours_zoom, count_hours_all]
+
+
+@app.callback(
+    Output(component_id='heatmap', component_property='figure'),
+    [Input(component_id='month', component_property='value'),
+     Input(component_id='data-heatmap', component_property='data'),
+     Input(component_id='limits', component_property='data')]
+)
+def update_figure_2d(month_value, data_heatmap, limits):
+    print('update_figure_2d')
+    counts = np.array(data_heatmap)
+    limits_x, limits_y = limits
+    z = np.log1p(counts).tolist()
+    data = {'z': z, 'x': df.bin_centers(x, limits_x, shape=shape), 'y': df.bin_centers(y, limits_y, shape=shape), 'type': 'heatmap'}
+    total_count = counts.sum()
     month = labels['month'][month_value]
-    figure_heat = {
+    return {
             'data': [data],
             'layout': {
                 'title': f'Taxi pickups for {month} (total {total_count:,})',
@@ -119,10 +132,19 @@ def update_output_div(month_value, relayoutData, yaxis_type):
             }
         }
 
-    figure_bar = {
+
+@app.callback(
+    Output(component_id='bar-chart', component_property='figure'),
+    [Input(component_id='data-bar', component_property='data'),
+     Input('yaxis-type', 'value')]
+)
+def update_figure_bar(data_bar, yaxis_type):
+    print('update_figure_bar')
+    count_hours_zoom, count_hours_all = data_bar
+    return {
             'data': [
-                {'x': labels['hour'], 'y': count_hours_zoom.tolist(), 'type':'bar', 'name': 'Zoomed region'},
-                {'x': labels['hour'], 'y': count_hours_all.tolist(),  'type':'bar', 'name': 'Full region'},
+                {'x': labels['hour'], 'y': count_hours_zoom, 'type':'bar', 'name': 'Zoomed region'},
+                {'x': labels['hour'], 'y': count_hours_all,  'type':'bar', 'name': 'Full region'},
             ],
             'layout': {
                 'title': f'Pickup hours in zoomed region',
@@ -130,7 +152,6 @@ def update_output_div(month_value, relayoutData, yaxis_type):
                 'yaxis': {'label': 'counts', 'type': 'linear' if yaxis_type == 'Linear' else 'log'}
             }
         }
-    return figure_heat, figure_bar
 
 if __name__ == '__main__':
     app.run_server(debug=True)
